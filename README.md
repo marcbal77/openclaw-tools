@@ -1,105 +1,82 @@
-# openclaw-tools
+# OpenClaw Tools
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-Agent%20Tools-orange)](https://github.com/nichochar/open-claw)
+Templates, scripts, and patterns for building AI-powered agent workflows.
 
-Production-tested templates, scripts, and patterns for building autonomous AI agent workflows on [OpenClaw](https://github.com/nichochar/open-claw).
+Born from real-world experience running autonomous AI agents in production — these are the patterns that survived contact with reality.
 
-Born from months of running a 24/7 AI agent system — these are the patterns that survived production. Sanitized for public use.
+## What's Inside
 
-## Who This Is For
-
-- **OpenClaw users** who want a proven starting point for agent configuration
-- **AI agent builders** looking for battle-tested operational patterns
-- **Anyone** running persistent AI agents who needs memory, self-improvement, and reliability systems
-
-## What's Included
-
-### Templates (`templates/`)
+### Templates
 
 | File | Purpose |
 |---|---|
-| **AGENTS.md** | Complete agent workspace configuration — session startup, memory, CEO Mode, Boris Loop, heartbeats, group chat behavior, task lifecycle |
-| **SOUL.md** | Agent identity template — define personality, values, mission, boundaries |
-| **HEARTBEAT.md** | Proactive heartbeat checklist — what to check, when to speak, when to stay quiet |
-| **MEMORY.md** | Long-term memory template — curated knowledge that persists across sessions |
-| **daily-note.md** | Daily log template (`memory/YYYY-MM-DD.md`) — raw session notes |
-| **lessons.md** | Boris Loop anti-pattern tracker — capture corrections, never repeat mistakes |
-| **heartbeat-state.json** | State tracking for heartbeat rotation — avoid redundant checks |
+| `templates/AGENTS.md` | Agent operating manual — workflow patterns, task lifecycle, CEO Mode, subagent strategy, safety rules |
+| `templates/SOUL.md` | Agent identity template — define personality, values, boundaries, and mission |
+| `templates/HEARTBEAT.md` | Heartbeat checklist — structured periodic health checks with smart rotation |
+| `templates/memory/MEMORY.md` | Long-term memory template — curated knowledge that persists across sessions |
+| `templates/memory/daily-note.md` | Daily note template — session logs, events, and end-of-day summaries |
+| `templates/memory/lessons.md` | The Boris Loop — anti-pattern log for continuous self-improvement |
 
-### Scripts (`scripts/`)
+### Scripts
 
 | File | Purpose |
 |---|---|
-| **smoke-test.sh** | Infrastructure smoke test framework with `run_test`/`run_warn` runners, `--json` output, colored terminal output, fix hints, and exit codes |
-| **gateway-watchdog.sh** | Gateway health monitor with graduated response: wait → restart → rollback config to last-known-good. Includes webhook alerting, log rotation, and crash-loop detection |
+| `scripts/smoke-test.sh` | Infrastructure smoke test suite — verify integrations after system changes |
+| `scripts/gateway-watchdog.sh` | Graduated response watchdog — auto-recover services with crash-loop detection |
 
 ## Key Patterns
 
-### The Boris Loop (Self-Improvement)
-After any correction or mistake:
-1. Add the pattern to `memory/lessons.md` (Date | Trigger | Lesson | Rule)
-2. Review lessons.md at every session start
-3. If the same mistake appears twice, escalate to AGENTS.md as a permanent rule
+### CEO Mode
+The main agent session acts as an orchestrator — it never does inline work. All research, code, and diagnostics are delegated to subagents. This preserves the main session's context window for decision-making and communication.
 
-Every correction compounds into permanent improvement.
+### The Boris Loop
+A self-improvement pattern: every mistake gets logged to `lessons.md`, categorized, and reviewed at session startup. The agent gets better over time, not just within a session.
 
-### CEO Mode (Context Preservation)
-Main session = CEO. It plans, delegates, and responds — it does NOT do work.
-- All research, coding, and deep work → spawn subagents
-- Main session stays light → fewer compactions → better continuity
-- Instant response time = trust
+### Task Lifecycle
+Every task follows `backlog → in_progress → review → done`. No skipping steps. Status must be set before work begins, and self-verification happens before review.
 
-### Graduated Watchdog Response
-1. **1st failure** → log, wait (could be transient)
-2. **2nd failure** → attempt restart
-3. **3rd+ failure** → rollback config + restart + alert
-4. **Max rollbacks exceeded** → back off + manual intervention alert
+### Graduated Watchdog
+The watchdog script implements a graduated response to failures:
+1. **First failure:** Log and wait
+2. **Second failure:** Attempt restart
+3. **Third+ failure:** Rollback config, restart, alert
 
-### Memory Architecture
-```
-MEMORY.md           → curated long-term memory (loaded in main session only)
-memory/
-  YYYY-MM-DD.md     → raw daily logs
-  lessons.md        → Boris Loop anti-patterns
-  heartbeat-state.json → check rotation state
-```
+With cooldown protection to prevent infinite rollback loops.
 
-## Quick Start
+### Memory System
+Three-tier memory: daily notes (session context), long-term memory (curated knowledge), and lessons learned (anti-patterns). Designed to survive context compaction events.
 
-1. **Copy templates** to your OpenClaw workspace:
+## Getting Started
+
+1. **Copy the templates** into your agent's project root:
    ```bash
-   cp templates/AGENTS.md ~/your-workspace/AGENTS.md
-   cp templates/SOUL.md ~/your-workspace/SOUL.md
-   cp templates/HEARTBEAT.md ~/your-workspace/HEARTBEAT.md
-   mkdir -p ~/your-workspace/memory
-   cp templates/MEMORY.md ~/your-workspace/MEMORY.md
-   cp templates/lessons.md ~/your-workspace/memory/lessons.md
-   cp templates/heartbeat-state.json ~/your-workspace/memory/heartbeat-state.json
+   cp -r templates/* ~/my-agent-project/
    ```
 
-2. **Customize SOUL.md** with your agent's identity and values.
+2. **Customize `SOUL.md`** — give your agent a name, mission, and personality
 
-3. **Edit AGENTS.md** to match your workflow — add/remove sections as needed.
-
-4. **Set up scripts** (optional):
+3. **Set up the memory directory:**
    ```bash
-   cp scripts/smoke-test.sh ~/your-workspace/scripts/
-   cp scripts/gateway-watchdog.sh ~/your-workspace/scripts/
-   chmod +x ~/your-workspace/scripts/*.sh
+   mkdir -p memory
+   cp templates/memory/* memory/
    ```
 
-5. **Customize smoke tests** — replace placeholder checks with your actual services and APIs.
+4. **Configure the smoke test** — edit `scripts/smoke-test.sh` to match your infrastructure
 
-6. **Configure watchdog alerts** — create a webhook env file with your alert URL:
-   ```bash
-   echo "ALERT_WEBHOOK_URL=https://your-webhook-url-here" > ~/.secrets/alert-webhook.env
-   ```
+5. **Point your agent's startup sequence** at `AGENTS.md` — this becomes the operating manual
+
+## Philosophy
+
+- **Ship > Perfect** — working systems over polished plans
+- **Log everything** — if it's not logged, it didn't happen
+- **Fail gracefully** — graduated responses, not binary crash/success
+- **Learn from mistakes** — systematic correction, not just apologies
+- **Context is precious** — delegate work, preserve the orchestrator
 
 ## Contributing
 
-Issues and PRs welcome. If you've built patterns that survived production use with OpenClaw agents, share them.
+Issues and PRs welcome. If you've built patterns that survived production use, we'd love to see them.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT License — see [LICENSE](LICENSE) for details.

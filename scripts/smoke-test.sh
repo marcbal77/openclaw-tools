@@ -1,165 +1,210 @@
-#!/bin/bash
-# ============================================================================
-# Infrastructure Smoke Test Suite
-# Run after: macOS updates, OpenClaw updates, Node.js updates, token renewals
-# Usage: ./scripts/smoke-test.sh [--json] [--fix]
-# ============================================================================
-
-set -uo pipefail
-
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
-
-PASS=0
-FAIL=0
-WARN=0
-RESULTS=()
-JSON_MODE=false
-FIX_MODE=false
-
-for arg in "$@"; do
-  case $arg in
-    --json) JSON_MODE=true ;;
-    --fix) FIX_MODE=true ;;
-  esac
-done
-
-# ── Test Runners ─────────────────────────────────────────────────────────────
-# run_test: Hard failure — counts toward exit code
-# run_warn: Soft warning — noted but doesn't fail the suite
-
-run_test() {
-  local name="$1"
-  local cmd="$2"
-  local fix_hint="${3:-}"
-
-  if eval "$cmd" > /dev/null 2>&1; then
-    PASS=$((PASS + 1))
-    RESULTS+=("PASS|$name|ok|$fix_hint")
-    if [ "$JSON_MODE" = false ]; then
-      echo -e "  ${GREEN}✅ PASS${NC}  $name"
-    fi
-  else
-    FAIL=$((FAIL + 1))
-    RESULTS+=("FAIL|$name|failed|$fix_hint")
-    if [ "$JSON_MODE" = false ]; then
-      echo -e "  ${RED}❌ FAIL${NC}  $name"
-      if [ -n "$fix_hint" ]; then
-        echo -e "         ${YELLOW}Fix: $fix_hint${NC}"
-      fi
-    fi
-  fi
-}
-
-run_warn() {
-  local name="$1"
-  local cmd="$2"
-  local fix_hint="${3:-}"
-
-  if eval "$cmd" > /dev/null 2>&1; then
-    PASS=$((PASS + 1))
-    RESULTS+=("PASS|$name|ok|$fix_hint")
-    if [ "$JSON_MODE" = false ]; then
-      echo -e "  ${GREEN}✅ PASS${NC}  $name"
-    fi
-  else
-    WARN=$((WARN + 1))
-    RESULTS+=("WARN|$name|warning|$fix_hint")
-    if [ "$JSON_MODE" = false ]; then
-      echo -e "  ${YELLOW}⚠️  WARN${NC}  $name"
-      if [ -n "$fix_hint" ]; then
-        echo -e "         ${YELLOW}Fix: $fix_hint${NC}"
-      fi
-    fi
-  fi
-}
-
-# ── Header ───────────────────────────────────────────────────────────────────
-
-if [ "$JSON_MODE" = false ]; then
-  echo ""
-  echo -e "${CYAN}🔍 Infrastructure Smoke Test Suite${NC}"
-  echo -e "${CYAN}$(date '+%Y-%m-%d %H:%M:%S %Z')${NC}"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo ""
-fi
-
-# ── GitHub ──────────────────────────────────────────────────────────────────
-# Verify GitHub CLI and authentication
-if [ "$JSON_MODE" = false ]; then echo -e "${CYAN}GitHub${NC}"; fi
-run_test "gh CLI installed" "which gh"
-run_test "gh auth valid" "gh auth status 2>&1 | grep -q 'Logged in'" "gh auth login -h github.com"
-run_test "git push access" "cd <YOUR_REPO_PATH> && git push --dry-run 2>&1 | grep -v 'fatal'" "Fix gh auth first"
-if [ "$JSON_MODE" = false ]; then echo ""; fi
-
-# ── External APIs ───────────────────────────────────────────────────────────
-# Add your API checks here. Example:
-# if [ "$JSON_MODE" = false ]; then echo -e "${CYAN}Your API${NC}"; fi
-# run_test "API credentials exist" "test -f <YOUR_CREDENTIALS_PATH>"
-# run_test "API token works" "curl -sf -H 'Authorization: Bearer <YOUR_TOKEN>' '<YOUR_API_ENDPOINT>' | grep -q 'ok'" "Check credentials"
-# if [ "$JSON_MODE" = false ]; then echo ""; fi
-
-# ── OpenClaw ────────────────────────────────────────────────────────────────
-if [ "$JSON_MODE" = false ]; then echo -e "${CYAN}OpenClaw${NC}"; fi
-run_test "OpenClaw installed" "which openclaw"
-run_test "Gateway running" "openclaw status 2>&1 | grep -qi 'gateway'" "openclaw gateway start"
-run_test "Gateway version matches npm" "openclaw status 2>&1 | grep -q \"\$(openclaw --version)\"" "openclaw gateway restart"
-if [ "$JSON_MODE" = false ]; then echo ""; fi
-
-# ── Node.js ─────────────────────────────────────────────────────────────────
-if [ "$JSON_MODE" = false ]; then echo -e "${CYAN}Node.js${NC}"; fi
-run_test "Node.js installed" "which node"
-run_test "Node.js version" "node --version | grep -q 'v2[0-9]'" "Update Node.js"
-run_test "npm installed" "which npm"
-if [ "$JSON_MODE" = false ]; then echo ""; fi
-
-# ── Paired Devices ──────────────────────────────────────────────────────────
-# Uncomment and customize for your setup:
-# if [ "$JSON_MODE" = false ]; then echo -e "${CYAN}Paired Devices${NC}"; fi
-# run_warn "<YOUR_DEVICE> paired" "openclaw devices list --json 2>&1 | grep -q '<YOUR_DEVICE>'" "Re-pair: openclaw node pair"
-# if [ "$JSON_MODE" = false ]; then echo ""; fi
-
-# ── Add Your Own Sections ───────────────────────────────────────────────────
-# Template:
+#!/usr/bin/env bash
+# smoke-test.sh — Infrastructure Smoke Test Suite
 #
-# if [ "$JSON_MODE" = false ]; then echo -e "${CYAN}Section Name${NC}"; fi
-# run_test "Check name" "command_to_verify" "How to fix if it fails"
-# run_warn "Optional check" "command_to_verify" "Fix hint"
-# if [ "$JSON_MODE" = false ]; then echo ""; fi
+# Run after system changes (OS updates, dependency upgrades, token renewals)
+# to verify all integrations are healthy.
+#
+# Usage:
+#   ./scripts/smoke-test.sh          # Human-readable output
+#   ./scripts/smoke-test.sh --json   # Machine-readable JSON output
+#
+# Exit code = number of hard failures (warnings don't count)
 
-# ── Summary ─────────────────────────────────────────────────────────────────
-TOTAL=$((PASS + FAIL + WARN))
+set -euo pipefail
 
-if [ "$JSON_MODE" = true ]; then
-  echo "{"
-  echo "  \"timestamp\": \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\","
-  echo "  \"total\": $TOTAL,"
-  echo "  \"pass\": $PASS,"
-  echo "  \"fail\": $FAIL,"
-  echo "  \"warn\": $WARN,"
-  echo "  \"results\": ["
-  first=true
-  for r in "${RESULTS[@]}"; do
-    IFS='|' read -r status name detail fix <<< "$r"
-    if [ "$first" = true ]; then first=false; else echo ","; fi
-    echo -n "    {\"status\":\"$status\",\"name\":\"$name\",\"detail\":\"$detail\",\"fix\":\"$fix\"}"
-  done
-  echo ""
-  echo "  ]"
-  echo "}"
-else
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo ""
-  if [ $FAIL -eq 0 ]; then
-    echo -e "  ${GREEN}ALL CLEAR${NC} — $PASS/$TOTAL passed, $WARN warnings"
+# ─── Configuration ────────────────────────────────────────────────────
+# Customize these for your environment
+
+PROJECT_DIR="${PROJECT_DIR:-$HOME/my-project}"
+# CONFIG_FILE="${CONFIG_FILE:-$HOME/.config/my-tool/config.json}"
+# HEALTH_ENDPOINT="${HEALTH_ENDPOINT:-https://localhost:8443/api/health}"
+
+# ─── State ────────────────────────────────────────────────────────────
+
+FAILURES=0
+WARNINGS=0
+PASSED=0
+TOTAL=0
+JSON_MODE=false
+RESULTS=()
+
+[[ "${1:-}" == "--json" ]] && JSON_MODE=true
+
+# ─── Helpers ──────────────────────────────────────────────────────────
+
+pass() {
+  local name="$1" detail="${2:-}"
+  ((TOTAL++)) || true
+  ((PASSED++)) || true
+  if $JSON_MODE; then
+    RESULTS+=("{\"status\":\"pass\",\"name\":\"$name\",\"detail\":\"$detail\"}")
   else
-    echo -e "  ${RED}$FAIL FAILURES${NC} — $PASS passed, $FAIL failed, $WARN warnings"
+    printf "  ✅ %-40s %s\n" "$name" "$detail"
   fi
+}
+
+fail() {
+  local name="$1" detail="${2:-}" fix="${3:-}"
+  ((TOTAL++)) || true
+  ((FAILURES++)) || true
+  if $JSON_MODE; then
+    RESULTS+=("{\"status\":\"fail\",\"name\":\"$name\",\"detail\":\"$detail\",\"fix\":\"$fix\"}")
+  else
+    printf "  ❌ %-40s %s\n" "$name" "$detail"
+    [[ -n "$fix" ]] && printf "     ↳ Fix: %s\n" "$fix"
+  fi
+}
+
+warn() {
+  local name="$1" detail="${2:-}" fix="${3:-}"
+  ((TOTAL++)) || true
+  ((WARNINGS++)) || true
+  if $JSON_MODE; then
+    RESULTS+=("{\"status\":\"warn\",\"name\":\"$name\",\"detail\":\"$detail\",\"fix\":\"$fix\"}")
+  else
+    printf "  ⚠️  %-40s %s\n" "$name" "$detail"
+    [[ -n "$fix" ]] && printf "     ↳ Fix: %s\n" "$fix"
+  fi
+}
+
+# ─── Test Categories ─────────────────────────────────────────────────
+
+test_git() {
+  $JSON_MODE || echo "── Git ──"
+
+  if command -v git &>/dev/null; then
+    pass "git installed" "$(git --version)"
+  else
+    fail "git installed" "not found" "Install git"
+    return
+  fi
+
+  if command -v gh &>/dev/null; then
+    pass "gh CLI installed" "$(gh --version | head -1)"
+  else
+    fail "gh CLI installed" "not found" "brew install gh"
+    return
+  fi
+
+  if gh auth status &>/dev/null; then
+    pass "gh auth valid"
+  else
+    fail "gh auth valid" "not authenticated" "gh auth login"
+  fi
+
+  # Dry-run push test for your primary repo
+  if [[ -d "$PROJECT_DIR/.git" ]]; then
+    if git -C "$PROJECT_DIR" push --dry-run &>/dev/null 2>&1; then
+      pass "git push (dry-run)" "$PROJECT_DIR"
+    else
+      warn "git push (dry-run)" "push may fail" "Check remote and credentials"
+    fi
+  fi
+}
+
+test_node() {
+  $JSON_MODE || echo "── Node.js ──"
+
+  if command -v node &>/dev/null; then
+    local ver
+    ver=$(node --version)
+    pass "node installed" "$ver"
+  else
+    fail "node installed" "not found" "Install Node.js"
+    return
+  fi
+
+  if command -v npm &>/dev/null; then
+    pass "npm installed" "$(npm --version)"
+  else
+    fail "npm installed" "not found" "Install npm"
+  fi
+}
+
+test_health_endpoint() {
+  $JSON_MODE || echo "── Service Health ──"
+
+  local endpoint="${HEALTH_ENDPOINT:-}"
+  if [[ -z "$endpoint" ]]; then
+    warn "health endpoint" "HEALTH_ENDPOINT not configured" "Set HEALTH_ENDPOINT env var"
+    return
+  fi
+
+  local response
+  if response=$(curl -sf --max-time 5 "$endpoint" 2>/dev/null); then
+    if echo "$response" | grep -qi "ok"; then
+      pass "health endpoint" "healthy"
+    else
+      warn "health endpoint" "responded but status unclear"
+    fi
+  else
+    fail "health endpoint" "unreachable" "Check if the service is running"
+  fi
+}
+
+test_api_credentials() {
+  $JSON_MODE || echo "── API Credentials ──"
+
+  # Example: check if a credentials file exists (customize path)
+  local creds_file="${CREDENTIALS_FILE:-}"
+  if [[ -z "$creds_file" ]]; then
+    warn "credentials file" "CREDENTIALS_FILE not configured" "Set CREDENTIALS_FILE env var"
+    return
+  fi
+
+  if [[ -f "$creds_file" ]]; then
+    pass "credentials file exists" "$creds_file"
+  else
+    fail "credentials file exists" "not found at $creds_file" "Create credentials file"
+  fi
+}
+
+test_docker() {
+  $JSON_MODE || echo "── Docker ──"
+
+  if command -v docker &>/dev/null; then
+    pass "docker installed" "$(docker --version | head -1)"
+  else
+    warn "docker installed" "not found" "Install Docker Desktop"
+    return
+  fi
+
+  if docker info &>/dev/null 2>&1; then
+    pass "docker daemon running"
+  else
+    warn "docker daemon running" "daemon not responding" "Start Docker Desktop"
+  fi
+}
+
+# ─── Run All Tests ───────────────────────────────────────────────────
+
+$JSON_MODE || echo ""
+$JSON_MODE || echo "🔬 Smoke Test Suite"
+$JSON_MODE || echo "═══════════════════════════════════════════════════"
+$JSON_MODE || echo ""
+
+test_git
+$JSON_MODE || echo ""
+test_node
+$JSON_MODE || echo ""
+test_health_endpoint
+$JSON_MODE || echo ""
+test_api_credentials
+$JSON_MODE || echo ""
+test_docker
+
+# ─── Summary ─────────────────────────────────────────────────────────
+
+if $JSON_MODE; then
+  printf '{"total":%d,"passed":%d,"warnings":%d,"failures":%d,"results":[%s]}\n' \
+    "$TOTAL" "$PASSED" "$WARNINGS" "$FAILURES" \
+    "$(IFS=,; echo "${RESULTS[*]}")"
+else
+  echo ""
+  echo "═══════════════════════════════════════════════════"
+  printf "  Total: %d | ✅ %d | ⚠️  %d | ❌ %d\n" "$TOTAL" "$PASSED" "$WARNINGS" "$FAILURES"
+  echo "═══════════════════════════════════════════════════"
   echo ""
 fi
 
-exit $FAIL
+exit "$FAILURES"

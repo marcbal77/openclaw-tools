@@ -1,43 +1,35 @@
-# Dependencies
-node_modules/
-package-lock.json
-
-# Secrets — NEVER commit these
+# Secrets and credentials
 .secrets/
 *.env
 .env.*
-!.env.example
-
-# API keys and tokens
-*credentials*
-*token*
-*.pem
+credentials.*
 *.key
-
-# OpenClaw config (contains tokens)
-openclaw.json
+*.pem
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Logs
-logs/
-*.log
-*.log.*
-
-# Editor
+# Editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Memory files with personal data (templates are fine)
-memory/*.md
-!memory/.gitkeep
+# Node
+node_modules/
+package-lock.json
+
+# Logs
+logs/
+*.log
 
 # Build artifacts
 dist/
 build/
-*.tgz
+.cache/
+
+# Memory state (runtime, not templates)
+memory/heartbeat-state.json
+memory/20*.md

@@ -1,203 +1,271 @@
-#!/bin/bash
-# gateway-watchdog.sh — OpenClaw Gateway Health Monitor
+#!/usr/bin/env bash
+# gateway-watchdog.sh — Graduated Response Gateway Watchdog
 #
-# Graduated response pattern:
-#   1st failure  → log warning, wait
-#   2nd failure  → attempt restart
-#   3rd+ failure → rollback config to last-known-good + restart + alert
+# Monitors a service/gateway health and auto-recovers from crashes using
+# a graduated response strategy:
 #
-# Does NOT use set -e; must handle errors gracefully in loop.
+#   Failure 1: Log and wait
+#   Failure 2: Attempt restart
+#   Failure 3+: Rollback config + restart + alert
+#
+# Features:
+#   - Crash-loop detection (process must survive >30 seconds)
+#   - Config rollback to last-known-good snapshot
+#   - Cooldown protection (max N rollbacks per hour)
+#   - Webhook alerts (Discord, Slack, etc.)
+#   - Log rotation
+#
+# Usage:
+#   ./scripts/gateway-watchdog.sh           # Run in foreground
+#   nohup ./scripts/gateway-watchdog.sh &   # Run as daemon
+#
+# Configure via environment variables or edit the CONFIG section below.
 
-OPENCLAW_CONFIG="$HOME/.openclaw/openclaw.json"
-LAST_GOOD="$HOME/.openclaw/openclaw.json.last-good"
-LOG="$HOME/logs/watchdog.log"
-LOG_MAX_BYTES=1048576  # 1MB
-WEBHOOK_ENV="$HOME/.secrets/alert-webhook.env"
-CHECK_INTERVAL=60
-GATEWAY_LABEL="ai.openclaw.gateway"
-MAX_ROLLBACKS_PER_HOUR=3
-ROLLBACK_WINDOW=3600
+set -uo pipefail
 
-mkdir -p "$(dirname "$LOG")"
+# ─── CONFIG ───────────────────────────────────────────────────────────
+# Override these with environment variables or edit directly
 
-# ─── Logging ────────────────────────────────────────────────────────────────
+CONFIG_FILE="${WATCHDOG_CONFIG_FILE:-$HOME/.config/my-gateway/config.json}"
+LAST_GOOD_CONFIG="${WATCHDOG_LAST_GOOD:-$HOME/.config/my-gateway/config.json.last-good}"
+LOG_FILE="${WATCHDOG_LOG:-$HOME/logs/watchdog.log}"
+CHECK_INTERVAL="${WATCHDOG_INTERVAL:-60}"           # seconds between checks
+MAX_ROLLBACKS_PER_HOUR="${WATCHDOG_MAX_ROLLBACKS:-3}"
+SERVICE_NAME="${WATCHDOG_SERVICE_NAME:-my-gateway}"  # launchd label or systemd unit
+HEALTHY_THRESHOLD="${WATCHDOG_HEALTHY_SECS:-120}"    # seconds healthy before snapshotting config
+CRASH_LOOP_THRESHOLD="${WATCHDOG_CRASH_SECS:-30}"    # process must survive this long
+
+# Webhook for alerts (set via env var or a secrets file)
+# WATCHDOG_WEBHOOK_URL="https://hooks.example.com/your-webhook"
+WEBHOOK_URL="${WATCHDOG_WEBHOOK_URL:-}"
+
+# ─── STATE ────────────────────────────────────────────────────────────
+
+consecutive_failures=0
+last_healthy_ts=0
+rollback_timestamps=()
+
+# ─── HELPERS ──────────────────────────────────────────────────────────
 
 log() {
-  local level="$1"; shift
-  local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [watchdog] [$level] $*"
-  echo "$msg" >> "$LOG"
-  echo "$msg"
-  # Rotate log at 1MB
-  if [[ -f "$LOG" ]]; then
-    local size
-    size=$(stat -f%z "$LOG" 2>/dev/null || stat -c%s "$LOG" 2>/dev/null || echo 0)
-    if [[ "$size" -gt "$LOG_MAX_BYTES" ]]; then
-      mv "$LOG" "${LOG}.$(date +%s).old"
-      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [watchdog] [INFO] Log rotated." > "$LOG"
-    fi
-  fi
+  local ts
+  ts=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$ts] $*" >> "$LOG_FILE"
 }
 
-# ─── Alert (Webhook) ────────────────────────────────────────────────────────
-# Configure ALERT_WEBHOOK_URL in your webhook env file.
-# Works with Discord, Slack, or any service accepting JSON POST with {"content": "..."}.
+rotate_log() {
+  local max_size=1048576  # 1MB
+  if [[ -f "$LOG_FILE" ]] && (( $(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) > max_size )); then
+    mv "$LOG_FILE" "${LOG_FILE}.old"
+    log "Log rotated"
+  fi
+}
 
 send_alert() {
   local message="$1"
-  if [[ ! -f "$WEBHOOK_ENV" ]]; then
-    log "WARN" "Webhook env not found at $WEBHOOK_ENV — skipping alert."
-    return 0
+  local level="${2:-warning}"  # info, warning, critical
+
+  log "ALERT [$level]: $message"
+
+  if [[ -n "$WEBHOOK_URL" ]]; then
+    # Generic webhook payload — customize for your platform
+    local payload
+    payload=$(cat <<JSONEOF
+{
+  "content": "**[$level] ${SERVICE_NAME} Watchdog**: ${message}"
+}
+JSONEOF
+)
+    curl -sf -X POST -H "Content-Type: application/json" \
+      -d "$payload" "$WEBHOOK_URL" &>/dev/null || true
   fi
-  local webhook_url
-  webhook_url=$(grep -E '^ALERT_WEBHOOK_URL=' "$WEBHOOK_ENV" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')
-  if [[ -z "$webhook_url" ]]; then
-    log "WARN" "ALERT_WEBHOOK_URL not set in $WEBHOOK_ENV — skipping alert."
-    return 0
-  fi
-  local payload
-  payload=$(python3 -c "import json,sys; print(json.dumps({'content': sys.argv[1]}))" "$message" 2>/dev/null || echo '{"content":"Alert (payload encoding error)"}')
-  curl -s -o /dev/null -w "%{http_code}" \
-    -H "Content-Type: application/json" \
-    -d "$payload" \
-    "$webhook_url" || log "WARN" "Webhook curl failed"
-  log "INFO" "Alert sent."
 }
 
-# ─── Health Check ───────────────────────────────────────────────────────────
+# ─── HEALTH CHECK ────────────────────────────────────────────────────
 
-# Returns 0 if gateway looks healthy, 1 if not
 check_gateway_health() {
-  # launchctl list returns 0 if service is registered; check PID field
-  local lc_output
-  lc_output=$(launchctl list "$GATEWAY_LABEL" 2>/dev/null) || return 1
+  # Strategy: check if the service process is running and has been alive
+  # long enough to not be crash-looping.
+  #
+  # Customize this function for your platform:
+  #   - macOS/launchd: launchctl list <label>
+  #   - Linux/systemd: systemctl is-active <unit>
+  #   - Generic: curl a health endpoint, check a PID file, etc.
 
-  # Extract PID from plist dict output
   local pid
-  pid=$(echo "$lc_output" | grep '"PID"' | grep -o '[0-9]*')
-  if [[ -z "$pid" ]]; then
-    return 1
+
+  # macOS launchd example:
+  if command -v launchctl &>/dev/null; then
+    pid=$(launchctl list "$SERVICE_NAME" 2>/dev/null | awk '/PID/ {print $2}')
+    if [[ -z "$pid" || "$pid" == "-" ]]; then
+      return 1  # Not running
+    fi
+  # Linux systemd example:
+  elif command -v systemctl &>/dev/null; then
+    if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+      return 1
+    fi
+    pid=$(systemctl show "$SERVICE_NAME" --property=MainPID --value 2>/dev/null)
+  else
+    # Fallback: check by process name
+    pid=$(pgrep -f "$SERVICE_NAME" | head -1)
+    if [[ -z "$pid" ]]; then
+      return 1
+    fi
   fi
 
-  # Check process is actually alive
+  # Verify process is actually alive
   if ! kill -0 "$pid" 2>/dev/null; then
     return 1
   fi
 
-  # Check process uptime > 30 seconds (not crash-looping)
-  local start_time now uptime_secs
-  start_time=$(ps -p "$pid" -o lstart= 2>/dev/null | xargs -I{} date -j -f "%a %b %d %T %Y" "{}" "+%s" 2>/dev/null || echo 0)
+  # Crash-loop detection: check process uptime
+  local start_time now elapsed
+  if [[ "$(uname)" == "Darwin" ]]; then
+    start_time=$(ps -o lstart= -p "$pid" 2>/dev/null | xargs -I{} date -j -f "%c" "{}" "+%s" 2>/dev/null || echo 0)
+  else
+    start_time=$(stat -c %Y "/proc/$pid" 2>/dev/null || echo 0)
+  fi
   now=$(date +%s)
-  uptime_secs=$(( now - start_time ))
+  elapsed=$((now - start_time))
 
-  if [[ "$uptime_secs" -lt 30 ]]; then
-    log "WARN" "Gateway PID=$pid alive but uptime=${uptime_secs}s (<30s) — possible crash-loop"
+  if (( elapsed < CRASH_LOOP_THRESHOLD )); then
+    log "Process $pid alive but only ${elapsed}s old (crash-loop suspected)"
     return 1
   fi
 
-  echo "$pid"  # echo PID so caller can capture it
   return 0
 }
 
-# ─── Rollback ───────────────────────────────────────────────────────────────
+# ─── RECOVERY ACTIONS ────────────────────────────────────────────────
+
+restart_service() {
+  log "Attempting restart of $SERVICE_NAME"
+
+  if command -v launchctl &>/dev/null; then
+    launchctl kickstart -k "gui/$(id -u)/$SERVICE_NAME" 2>/dev/null || \
+    launchctl kickstart -k "system/$SERVICE_NAME" 2>/dev/null || true
+  elif command -v systemctl &>/dev/null; then
+    systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+  else
+    log "No service manager found — manual restart required"
+    send_alert "Cannot auto-restart: no launchd/systemd found. Manual restart required." "critical"
+  fi
+}
 
 rollback_config() {
-  if [[ ! -f "$LAST_GOOD" ]]; then
-    log "ERROR" "No last-good config at $LAST_GOOD — cannot rollback!"
+  if [[ ! -f "$LAST_GOOD_CONFIG" ]]; then
+    log "No last-good config to rollback to"
     return 1
   fi
 
-  local broken_path="$HOME/.openclaw/openclaw.json.broken.$(date +%s)"
-  log "WARN" "Saving broken config → $broken_path"
-  cp "$OPENCLAW_CONFIG" "$broken_path" 2>/dev/null || true
-
-  log "INFO" "Restoring last-good config..."
-  cp "$LAST_GOOD" "$OPENCLAW_CONFIG"
-  log "INFO" "Config restored from $LAST_GOOD"
+  log "Rolling back config: $CONFIG_FILE → last-good snapshot"
+  cp "$LAST_GOOD_CONFIG" "$CONFIG_FILE"
+  return 0
 }
 
-restart_gateway() {
-  log "INFO" "Restarting gateway via launchctl kickstart..."
-  launchctl kickstart -k "gui/$(id -u)/$GATEWAY_LABEL" 2>/dev/null || \
-    log "ERROR" "launchctl kickstart failed (gateway may need manual start)"
-}
+snapshot_config() {
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    return
+  fi
 
-snapshot_good_config() {
+  # Only snapshot if config has changed
   local current_hash last_hash
-  current_hash=$(md5 -q "$OPENCLAW_CONFIG" 2>/dev/null || md5sum "$OPENCLAW_CONFIG" 2>/dev/null | cut -d' ' -f1)
-  last_hash=$(md5 -q "$LAST_GOOD" 2>/dev/null || md5sum "$LAST_GOOD" 2>/dev/null | cut -d' ' -f1 || echo "none")
+  current_hash=$(md5sum "$CONFIG_FILE" 2>/dev/null | cut -d' ' -f1 || md5 -q "$CONFIG_FILE" 2>/dev/null || echo "unknown")
+  last_hash=$(md5sum "$LAST_GOOD_CONFIG" 2>/dev/null | cut -d' ' -f1 || md5 -q "$LAST_GOOD_CONFIG" 2>/dev/null || echo "none")
+
   if [[ "$current_hash" != "$last_hash" ]]; then
-    cp "$OPENCLAW_CONFIG" "$LAST_GOOD"
-    log "INFO" "Snapshotted good config → $LAST_GOOD (hash changed)"
+    cp "$CONFIG_FILE" "$LAST_GOOD_CONFIG"
+    log "Config snapshot updated (hash changed: ${current_hash:0:8})"
   fi
 }
 
-# ─── Main Loop ──────────────────────────────────────────────────────────────
-
-log "INFO" "Gateway Watchdog starting. Checking every ${CHECK_INTERVAL}s."
-
-consecutive_failures=0
-gateway_up_since=0   # epoch when last seen healthy
-rollback_count=0
-rollback_window_start=0
-
-while true; do
-  pid_output=$(check_gateway_health 2>/dev/null) && HEALTHY=1 || HEALTHY=0
+check_rollback_cooldown() {
+  local now
   now=$(date +%s)
+  local one_hour_ago=$((now - 3600))
 
-  if [[ "$HEALTHY" -eq 1 ]]; then
-    consecutive_failures=0
-
-    # Track continuous uptime
-    if [[ "$gateway_up_since" -eq 0 ]]; then
-      gateway_up_since="$now"
+  # Prune old timestamps
+  local recent=()
+  for ts in "${rollback_timestamps[@]}"; do
+    if (( ts > one_hour_ago )); then
+      recent+=("$ts")
     fi
+  done
+  rollback_timestamps=("${recent[@]+"${recent[@]}"}")
 
-    continuous_uptime=$(( now - gateway_up_since ))
-
-    if [[ "$continuous_uptime" -gt 120 ]]; then
-      snapshot_good_config
-    fi
-
-    log "INFO" "Gateway healthy (PID=${pid_output:-?}, continuous_uptime=${continuous_uptime}s)"
-
-  else
-    consecutive_failures=$(( consecutive_failures + 1 ))
-    gateway_up_since=0
-    log "WARN" "Gateway unhealthy (consecutive_failures=$consecutive_failures)"
-
-    if [[ "$consecutive_failures" -eq 1 ]]; then
-      log "WARN" "1st failure — waiting before action."
-
-    elif [[ "$consecutive_failures" -eq 2 ]]; then
-      log "WARN" "2nd consecutive failure — attempting restart."
-      restart_gateway
-
-    elif [[ "$consecutive_failures" -ge 3 ]]; then
-      log "ERROR" "3rd+ failure — CRASH-LOOP DETECTED. Rolling back config."
-
-      # Cooldown: max N rollbacks per hour
-      if [[ $(( now - rollback_window_start )) -gt "$ROLLBACK_WINDOW" ]]; then
-        rollback_count=0
-        rollback_window_start="$now"
-      fi
-
-      if [[ "$rollback_count" -ge "$MAX_ROLLBACKS_PER_HOUR" ]]; then
-        log "ERROR" "Max rollbacks ($MAX_ROLLBACKS_PER_HOUR/hr) exceeded. Manual intervention required."
-        send_alert "Gateway Watchdog: Max rollbacks exceeded ($MAX_ROLLBACKS_PER_HOUR/hr). Last-good config may also be broken. Manual intervention required! Timestamp: $(date)"
-        consecutive_failures=0
-        sleep 300  # Back off 5 minutes
-      elif rollback_config; then
-        rollback_count=$(( rollback_count + 1 ))
-        restart_gateway
-        send_alert "Gateway Watchdog: Crash-loop detected. Config rolled back to last-known-good. Check ~/.openclaw/openclaw.json.broken.* for the bad config. Timestamp: $(date)"
-        log "INFO" "Rollback + restart complete. Resetting failure counter."
-        consecutive_failures=0
-      else
-        log "ERROR" "Rollback failed — no last-good config. Manual intervention required."
-        send_alert "Gateway Watchdog: Crash-loop detected but NO last-good config found for rollback. Manual intervention required! Timestamp: $(date)"
-      fi
-    fi
+  if (( ${#rollback_timestamps[@]} >= MAX_ROLLBACKS_PER_HOUR )); then
+    return 1  # Cooldown active
   fi
+  return 0
+}
 
-  sleep "$CHECK_INTERVAL"
-done
+# ─── MAIN LOOP ────────────────────────────────────────────────────────
+
+main() {
+  mkdir -p "$(dirname "$LOG_FILE")"
+  log "Watchdog started for $SERVICE_NAME (interval: ${CHECK_INTERVAL}s)"
+
+  while true; do
+    rotate_log
+
+    if check_gateway_health; then
+      # Healthy
+      if (( consecutive_failures > 0 )); then
+        log "Service recovered after $consecutive_failures failure(s)"
+        consecutive_failures=0
+      fi
+
+      local now
+      now=$(date +%s)
+
+      # Snapshot config after sustained health
+      if (( last_healthy_ts > 0 )) && (( now - last_healthy_ts > HEALTHY_THRESHOLD )); then
+        snapshot_config
+      fi
+      last_healthy_ts=$now
+
+    else
+      # Unhealthy
+      ((consecutive_failures++)) || true
+      log "Health check failed (consecutive: $consecutive_failures)"
+
+      case $consecutive_failures in
+        1)
+          # Failure 1: Log and wait
+          log "First failure — waiting for next check"
+          ;;
+        2)
+          # Failure 2: Attempt restart
+          log "Second failure — attempting restart"
+          restart_service
+          send_alert "Service restarted after 2 consecutive failures" "warning"
+          ;;
+        *)
+          # Failure 3+: Crash-loop detected — rollback + restart
+          log "Crash-loop detected ($consecutive_failures failures)"
+
+          if check_rollback_cooldown; then
+            if rollback_config; then
+              rollback_timestamps+=("$(date +%s)")
+              restart_service
+              send_alert "Crash-loop: config rolled back and service restarted (failure #$consecutive_failures)" "critical"
+            else
+              restart_service
+              send_alert "Crash-loop: restart attempted but no config backup available" "critical"
+            fi
+          else
+            # Cooldown active — too many rollbacks
+            log "Rollback cooldown active ($MAX_ROLLBACKS_PER_HOUR rollbacks/hour exceeded)"
+            send_alert "MANUAL INTERVENTION REQUIRED: rollback cooldown exceeded. $consecutive_failures consecutive failures." "critical"
+            sleep 300  # 5-minute backoff
+          fi
+          ;;
+      esac
+    fi
+
+    sleep "$CHECK_INTERVAL"
+  done
+}
+
+main "$@"
