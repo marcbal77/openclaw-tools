@@ -1,82 +1,74 @@
 # OpenClaw Tools
 
-Templates, scripts, and patterns for building AI-powered agent workflows.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![OpenClaw](https://img.shields.io/badge/Built%20for-OpenClaw-orange)](https://github.com/nichochar/open-claw)
 
-Born from real-world experience running autonomous AI agents in production — these are the patterns that survived contact with reality.
+Production-tested templates and scripts for autonomous AI agent workflows. Not theory — patterns extracted from a 24/7 agent system that's been running in production. They've been simplified, stress-tested, and sanitized for general use.
 
-## What's Inside
+## What's Here
 
 ### Templates
 
-| File | Purpose |
+| File | What it does |
 |---|---|
-| `templates/AGENTS.md` | Agent operating manual — workflow patterns, task lifecycle, CEO Mode, subagent strategy, safety rules |
-| `templates/SOUL.md` | Agent identity template — define personality, values, boundaries, and mission |
-| `templates/HEARTBEAT.md` | Heartbeat checklist — structured periodic health checks with smart rotation |
-| `templates/memory/MEMORY.md` | Long-term memory template — curated knowledge that persists across sessions |
-| `templates/memory/daily-note.md` | Daily note template — session logs, events, and end-of-day summaries |
-| `templates/memory/lessons.md` | The Boris Loop — anti-pattern log for continuous self-improvement |
+| `templates/AGENTS.md` | The operating manual. CEO Mode, task lifecycle, subagent strategy, safety rules, context preservation. |
+| `templates/SOUL.md` | Give your agent an identity — name, values, mission, and behavioral boundaries. |
+| `templates/HEARTBEAT.md` | Structured heartbeat checks with rotation logic. Turns heartbeats from noisy acknowledgments into useful periodic work. |
+| `templates/memory/MEMORY.md` | Long-term curated memory. Survives compaction. Stays under 200 lines. |
+| `templates/memory/daily-note.md` | Per-session logs. Keeps context alive across restarts. |
+| `templates/memory/lessons.md` | The Boris Loop — anti-pattern log for compounding improvement over time. |
 
 ### Scripts
 
-| File | Purpose |
+| File | What it does |
 |---|---|
-| `scripts/smoke-test.sh` | Infrastructure smoke test suite — verify integrations after system changes |
-| `scripts/gateway-watchdog.sh` | Graduated response watchdog — auto-recover services with crash-loop detection |
+| `scripts/smoke-test.sh` | Infrastructure health suite. Runs after system changes. Supports `--json` for CI integration. |
+| `scripts/gateway-watchdog.sh` | Service monitor with graduated response: log → restart → config rollback → alert. Crash-loop detection + cooldown protection. |
 
 ## Key Patterns
 
-### CEO Mode
-The main agent session acts as an orchestrator — it never does inline work. All research, code, and diagnostics are delegated to subagents. This preserves the main session's context window for decision-making and communication.
+**CEO Mode** — The main agent orchestrates; it never grinds. All implementation work goes to subagents. Result: the main session stays light, responds instantly, and compacts less often.
 
-### The Boris Loop
-A self-improvement pattern: every mistake gets logged to `lessons.md`, categorized, and reviewed at session startup. The agent gets better over time, not just within a session.
+**The Boris Loop** — Every mistake gets logged to `lessons.md` with context and a rule. Every session starts by reading those lessons. Corrections compound. The agent gets measurably better over time.
 
-### Task Lifecycle
-Every task follows `backlog → in_progress → review → done`. No skipping steps. Status must be set before work begins, and self-verification happens before review.
+**Task Lifecycle** — `backlog → in_progress → review → done`. Status moves *before* work starts. Self-verification happens *before* review. No skipping. This discipline is what separates agents that drift from ones that ship.
 
-### Graduated Watchdog
-The watchdog script implements a graduated response to failures:
-1. **First failure:** Log and wait
-2. **Second failure:** Attempt restart
-3. **Third+ failure:** Rollback config, restart, alert
+**Graduated Watchdog** — Services fail. The script handles it without drama: wait once, restart on the second failure, roll back config and alert on the third. Max rollbacks per hour prevents runaway recovery loops.
 
-With cooldown protection to prevent infinite rollback loops.
-
-### Memory System
-Three-tier memory: daily notes (session context), long-term memory (curated knowledge), and lessons learned (anti-patterns). Designed to survive context compaction events.
+**Three-Tier Memory** — Daily notes for session context, `MEMORY.md` for curated long-term knowledge, `lessons.md` for operational corrections. Each file has a specific role; none pollute the others.
 
 ## Getting Started
 
-1. **Copy the templates** into your agent's project root:
-   ```bash
-   cp -r templates/* ~/my-agent-project/
-   ```
+```bash
+# Copy templates to your agent workspace
+cp -r templates/* ~/my-agent-project/
 
-2. **Customize `SOUL.md`** — give your agent a name, mission, and personality
+# Set up memory directory
+mkdir -p ~/my-agent-project/memory
+cp templates/memory/* ~/my-agent-project/memory/
 
-3. **Set up the memory directory:**
-   ```bash
-   mkdir -p memory
-   cp templates/memory/* memory/
-   ```
+# Make scripts executable
+chmod +x scripts/*.sh
+```
 
-4. **Configure the smoke test** — edit `scripts/smoke-test.sh` to match your infrastructure
-
-5. **Point your agent's startup sequence** at `AGENTS.md` — this becomes the operating manual
+Then:
+1. **Edit `SOUL.md`** — fill in your agent's name, mission, and values
+2. **Edit `AGENTS.md`** — remove sections that don't apply, add your own patterns
+3. **Configure `smoke-test.sh`** — replace the placeholder checks with your actual services
+4. **Point your agent's startup sequence at `AGENTS.md`** — this becomes the operating manual
 
 ## Philosophy
 
-- **Ship > Perfect** — working systems over polished plans
-- **Log everything** — if it's not logged, it didn't happen
-- **Fail gracefully** — graduated responses, not binary crash/success
-- **Learn from mistakes** — systematic correction, not just apologies
-- **Context is precious** — delegate work, preserve the orchestrator
+- **Ship > perfect.** Working systems beat polished plans.
+- **Log everything.** If it's not logged, it didn't happen.
+- **Fail gracefully.** Graduated responses, not binary crash/success.
+- **Learn from mistakes.** Systematic correction, not just apologies.
+- **Context is precious.** Delegate work aggressively. Protect the orchestrator.
 
 ## Contributing
 
-Issues and PRs welcome. If you've built patterns that survived production use, we'd love to see them.
+If you've built patterns that survived production, PRs are welcome. The bar is simple: did it hold up when things went sideways?
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
